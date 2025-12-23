@@ -338,6 +338,7 @@ esp_err_t wifi_prov_connect(const char *ssid, const char *password)
     /* Para o servidor web ANTES de mexer no Wi-Fi */
     if (server) {
         ESP_LOGI(TAG, "Parando servidor HTTP...");
+        // TODO: essa funcao aparentemente estava  travando o fluxo. eu comentei e aparentemente passou a funcionar. talvez rever? é necessario manter? 
         // httpd_stop(server);
         server = NULL;
         vTaskDelay(pdMS_TO_TICKS(200));  // Aguarda finalizar
