@@ -3,11 +3,15 @@
 #include "freertos/task.h"
 #include "esp_log.h"
 #include "wifi_ap.h"
+#include "nvs_flash.h"
+#include "nvs.h"
 
 static const char *TAG = "Main";
 
 void app_main(void)
 {
+    
+
     ESP_LOGI(TAG, "Iniciando sistema de provisionamento Wi-Fi");
 
     /* Inicializa o sistema de provisionamento */

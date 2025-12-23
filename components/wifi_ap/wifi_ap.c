@@ -13,6 +13,7 @@
 #include <stdbool.h>
 #include <ctype.h>
 
+
 static const char *TAG = "WiFi_Prov";
 
 /* FreeRTOS event group para sinalizar quando estamos conectados */
@@ -168,12 +169,14 @@ static esp_err_t save_handler(httpd_req_t *req)
     /* Recebe os dados POST */
     if (remaining > sizeof(buf) - 1) {
         httpd_resp_send_500(req);
+        ESP_LOGI(TAG, "Erro ao receber dados de POST...");
         return ESP_FAIL;
     }
 
     ret = httpd_req_recv(req, buf, remaining);
     if (ret <= 0) {
         if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+            ESP_LOGI(TAG, "Timeout ao receber dados de POST...");
             httpd_resp_send_408(req);
         }
         return ESP_FAIL;
@@ -204,6 +207,8 @@ static esp_err_t save_handler(httpd_req_t *req)
         url_decode(password, password);
         
         ESP_LOGI(TAG, "SSID recebido: %s", ssid);
+        ESP_LOGI(TAG, "Senha recebida: %s", password);  // ← ADICIONE
+        ESP_LOGI(TAG, "Iniciando conexao ao Wi-Fi...");  // ← ADICIONE
         
         /* Envia página de sucesso */
         httpd_resp_set_type(req, "text/html");
@@ -214,6 +219,7 @@ static esp_err_t save_handler(httpd_req_t *req)
         
         /* Conecta ao Wi-Fi com as credenciais fornecidas */
         wifi_prov_connect(ssid, password);
+        ESP_LOGI(TAG, "Conectado em %s senha: %s...", ssid, password);
         
         return ESP_OK;
     }
@@ -320,51 +326,110 @@ esp_err_t wifi_prov_start_ap(const char *ap_ssid, const char *ap_password)
 }
 
 /* Conecta ao Wi-Fi */
+/* Conecta ao Wi-Fi - VERSÃO CORRIGIDA */
 esp_err_t wifi_prov_connect(const char *ssid, const char *password)
 {
-    /* Para o AP e servidor web se estiverem rodando */
+    ESP_LOGI(TAG, "=== INICIANDO CONEXÃO WI-FI ===");
+    ESP_LOGI(TAG, "SSID: %s", ssid);
+    
+    /* Aguarda um pouco para garantir que a resposta HTTP foi enviada */
+    vTaskDelay(pdMS_TO_TICKS(500));
+    
+    /* Para o servidor web ANTES de mexer no Wi-Fi */
     if (server) {
-        httpd_stop(server);
+        ESP_LOGI(TAG, "Parando servidor HTTP...");
+        // httpd_stop(server);
         server = NULL;
+        vTaskDelay(pdMS_TO_TICKS(200));  // Aguarda finalizar
     }
     
+    /* Limpa event bits anteriores */
+    xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    s_retry_num = 0;
+    
+    /* Para o Wi-Fi atual */
+    ESP_LOGI(TAG, "Reconfigurando Wi-Fi...");
     esp_wifi_stop();
-    esp_wifi_deinit();
+    vTaskDelay(pdMS_TO_TICKS(100));
     
-    /* Recria a interface, agora como STA */
-    esp_netif_create_default_wifi_sta();
+    /* Cria interface STA se não existir */
+    esp_netif_t *sta_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (sta_netif == NULL) {
+        ESP_LOGI(TAG, "Criando interface STA...");
+        sta_netif = esp_netif_create_default_wifi_sta();
+    }
     
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    /* Configura para modo Station */
+    /* Muda para modo APSTA (AP + Station) */
+    ESP_LOGI(TAG, "Mudando para modo APSTA...");
+    esp_wifi_set_mode(WIFI_MODE_APSTA);
+    
+    /* Configura Station */
     wifi_config_t wifi_config = {0};
-    strcpy((char *)wifi_config.sta.ssid, ssid);
-    strcpy((char *)wifi_config.sta.password, password);
+    strncpy((char *)wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid) - 1);
+    strncpy((char *)wifi_config.sta.password, password, sizeof(wifi_config.sta.password) - 1);
     wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wifi_config.sta.pmf_cfg.capable = true;
+    wifi_config.sta.pmf_cfg.required = false;
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_LOGI(TAG, "Configurando credenciais...");
+    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+    
+    /* Reinicia Wi-Fi */
+    ESP_LOGI(TAG, "Iniciando Wi-Fi...");
+    esp_wifi_start();
 
-    ESP_LOGI(TAG, "Tentando conectar ao SSID: %s", ssid);
+    ESP_LOGI(TAG, "Aguardando conexão (timeout: 30s)...");
 
-    /* Aguarda conexão ou falha */
+    /* Aguarda conexão ou falha (timeout de 30 segundos) */
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
             WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
             pdFALSE,
             pdFALSE,
-            portMAX_DELAY);
+            pdMS_TO_TICKS(30000)); // 30 segundos
+
+    /* Limpa os bits */
+    xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
 
     if (bits & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "Conectado ao Wi-Fi com sucesso!");
+        ESP_LOGI(TAG, "✅ CONECTADO AO WI-FI COM SUCESSO!");
+        
+        /* Desabilita o modo AP agora que conectou */
+        ESP_LOGI(TAG, "Mudando para modo Station puro...");
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        
         return ESP_OK;
+        
     } else if (bits & WIFI_FAIL_BIT) {
-        ESP_LOGE(TAG, "Falha ao conectar ao Wi-Fi");
+        ESP_LOGE(TAG, "❌ FALHA AO CONECTAR - Senha incorreta ou rede não encontrada");
+        
+        /* Volta para modo AP puro */
+        ESP_LOGI(TAG, "Voltando para modo AP...");
+        esp_wifi_stop();
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_wifi_set_mode(WIFI_MODE_AP);
+        esp_wifi_start();
+        
+        /* Reinicia servidor web após estabilizar */
+        vTaskDelay(pdMS_TO_TICKS(500));
+        start_webserver();
+        
+        return ESP_FAIL;
+        
+    } else {
+        ESP_LOGE(TAG, "❌ TIMEOUT - Não foi possível conectar em 30 segundos");
+        
+        /* Volta para modo AP puro */
+        ESP_LOGI(TAG, "Voltando para modo AP...");
+        esp_wifi_stop();
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_wifi_set_mode(WIFI_MODE_AP);
+        esp_wifi_start();
+        
+        vTaskDelay(pdMS_TO_TICKS(500));
+        start_webserver();
+        
         return ESP_FAIL;
     }
-
-    return ESP_FAIL;
 }
 
 /* Verifica se está conectado */
